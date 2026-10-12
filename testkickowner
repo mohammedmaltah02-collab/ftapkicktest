@@ -1,0 +1,348 @@
+--[[
+	FTAP KICK OWNERSHIP - FAST EDITION
+	UI: Obsidian (Linoria fork)
+	Only does one thing: kick people from your plot, instantly.
+]]
+
+local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+Library.ForceCheckbox = false
+Library.ShowToggleFrameInKeybinds = true
+
+-- =========================
+--  CONFIG (change if remotes are different)
+-- =========================
+local CONFIG = {
+	KickRemoteName = "Kick", -- common FTAP remote name
+	KickRemotePath = {"Remotes"}, -- ReplicatedStorage path to remote folder
+	CheckInterval = 0.05, -- 50ms — as fast as we can realistically check
+}
+
+-- =========================
+--  SERVICES
+-- =========================
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+-- =========================
+--  FIND REMOTES (auto-detect common FTAP names)
+-- =========================
+local kickRemote = nil
+
+local function findRemote()
+	-- Try common paths
+	local paths = {
+		{"Remotes", "Kick"},
+		{"Remotes", "KickPlayer"},
+		{"Remotes", "Ownership", "Kick"},
+		{"Remotes", "Plot", "Kick"},
+		{"RemoteEvents", "Kick"},
+		{"Kick"},
+	}
+
+	for _, path in ipairs(paths) do
+		local current = ReplicatedStorage
+		local found = true
+		for _, segment in ipairs(path) do
+			current = current:FindFirstChild(segment)
+			if not current then
+				found = false
+				break
+			end
+		end
+		if found and current and current:IsA("RemoteEvent") then
+			kickRemote = current
+			return true
+		end
+	end
+	return false
+end
+
+findRemote()
+
+-- Fallback: scan ReplicatedStorage for anything with "kick" in the name
+if not kickRemote then
+	for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+		if obj:IsA("RemoteEvent") and string.find(string.lower(obj.Name), "kick") then
+			kickRemote = obj
+			break
+		end
+	end
+end
+
+-- =========================
+--  GET OWN PLOT
+-- =========================
+local function getMyPlot()
+	local plots = workspace:FindFirstChild("Plots") or workspace:FindFirstChild("Houses")
+	if not plots then return nil end
+
+	for _, plot in ipairs(plots:GetChildren()) do
+		local owner = plot:FindFirstChild("Owner") or plot:GetAttribute("Owner")
+		if typeof(owner) == "Instance" and owner.Value == LocalPlayer then
+			return plot
+		elseif typeof(owner) == "string" and owner == LocalPlayer.Name then
+			return plot
+		elseif plot:GetAttribute("Owner") == LocalPlayer.UserId then
+			return plot
+		end
+	end
+
+	-- fallback: try to find by character proximity
+	local char = LocalPlayer.Character
+	if not char then return nil end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then return nil end
+
+	local closest, dist = nil, math.huge
+	for _, plot in ipairs(plots:GetChildren()) do
+		local part = plot:FindFirstChild("Spawn") or plot:FindFirstChild("Floor")
+		if part and part:IsA("BasePart") then
+			local d = (part.Position - root.Position).Magnitude
+			if d < dist then
+				dist = d
+				closest = plot
+			end
+		end
+	end
+	return closest
+end
+
+-- =========================
+--  KICK FUNCTION (fires instantly)
+-- =========================
+local kickedRecently = {}
+
+local function kickPlayer(target)
+	if not target or target == LocalPlayer then return end
+	if kickedRecently[target.UserId] then return end
+	kickedRecently[target.UserId] = true
+
+	-- method 1: remote
+	if kickRemote then
+		pcall(function()
+			kickRemote:FireServer(target)
+		end)
+		pcall(function()
+			kickRemote:FireServer(target.UserId)
+		end)
+		pcall(function()
+			kickRemote:FireServer("Kick", target)
+		end)
+	end
+
+	-- method 2: ownership attribute toggling (some FTAP versions)
+	local plot = getMyPlot()
+	if plot then
+		local ownerRemote = plot:FindFirstChild("OwnerRemote") or plot:FindFirstChild("KickRemote")
+		if ownerRemote then
+			pcall(function()
+				ownerRemote:FireServer(target)
+			end)
+		end
+	end
+
+	-- clear flag after 3s so we can re-kick if needed
+	task.delay(3, function()
+		kickedRecently[target.UserId] = nil
+	end)
+end
+
+-- =========================
+--  WINDOW
+-- =========================
+local Window = Library:CreateWindow({
+	Title = "FTAP KICK OWNERSHIP",
+	Footer = "fast edition",
+	Icon = 95816097006870,
+	NotifySide = "Right",
+	ShowCustomCursor = true,
+})
+
+local Tabs = {
+	Kick = Window:AddTab("Kick", "sword"),
+	["UI Settings"] = Window:AddTab("UI Settings", "settings"),
+}
+
+local KickGroup = Tabs.Kick:AddLeftGroupbox("Ownership Kick", "shield")
+
+-- Status label
+KickGroup:AddLabel("Remote: " .. (kickRemote and kickRemote:GetFullName() or "NOT FOUND"))
+
+-- Instant kick all button
+KickGroup:AddButton({
+	Text = "⚡ Kick Everyone From My Plot",
+	Func = function()
+		local plot = getMyPlot()
+		if not plot then
+			Library:Notify({ Title = "Kick Ownership", Description = "Couldn't find your plot.", Time = 3 })
+			return
+		end
+
+		local count = 0
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player ~= LocalPlayer then
+				kickPlayer(player)
+				count += 1
+			end
+		end
+
+		Library:Notify({
+			Title = "Kick Ownership",
+			Description = "Fired kick at " .. count .. " players.",
+			Time = 3,
+		})
+	end,
+	Tooltip = "Immediately fires the ownership kick remote at every other player",
+})
+
+KickGroup:AddDivider()
+
+-- Auto kick toggle
+KickGroup:AddToggle("AutoKick", {
+	Text = "Auto Kick (instant on enter)",
+	Default = false,
+	Tooltip = "Anyone who steps into your plot gets kicked the frame they enter",
+})
+
+KickGroup:AddSlider("KickRange", {
+	Text = "Detection Range",
+	Default = 100,
+	Min = 10,
+	Max = 500,
+	Rounding = 0,
+	Suffix = " studs",
+	Tooltip = "How far from your plot center to detect intruders",
+})
+
+KickGroup:AddDivider()
+
+-- Kick specific player dropdown
+KickGroup:AddDropdown("TargetPlayer", {
+	SpecialType = "Player",
+	ExcludeLocalPlayer = true,
+	Text = "Kick Specific Player",
+	Tooltip = "Pick a player and hit the button",
+})
+
+KickGroup:AddButton({
+	Text = "⚡ Kick Selected",
+	Func = function()
+		local target = Options.TargetPlayer.Value
+		if not target then
+			Library:Notify({ Title = "Kick Ownership", Description = "No player selected.", Time = 3 })
+			return
+		end
+		kickPlayer(target)
+		Library:Notify({ Title = "Kick Ownership", Description = "Fired kick at " .. target.Name, Time = 3 })
+	end,
+})
+
+-- =========================
+--  AUTO-KICK ENGINE (event-driven = FAST)
+-- =========================
+local activeConnections = {}
+
+local function startAutoKick()
+	local plot = getMyPlot()
+	if not plot then
+		Library:Notify({ Title = "Kick Ownership", Description = "No plot found — can't auto-kick.", Time = 3 })
+		return
+	end
+
+	local originPart = plot:FindFirstChild("Spawn") or plot:FindFirstChild("Floor")
+	if not originPart then
+		-- fallback to plot's PrimaryPart or a random BasePart
+		originPart = plot.PrimaryPart
+		if not originPart then
+			for _, d in ipairs(plot:GetDescendants()) do
+				if d:IsA("BasePart") then
+					originPart = d
+					break
+				end
+			end
+		end
+	end
+	if not originPart then return end
+
+	-- Connection 1: check each player's HumanoidRootPart every Heartbeat
+	table.insert(activeConnections, RunService.Heartbeat:Connect(function()
+		if not Toggles.AutoKick.Value then return end
+		local range = Options.KickRange.Value
+		local origin = originPart.Position
+
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player == LocalPlayer then continue end
+			local char = player.Character
+			if not char then continue end
+			local root = char:FindFirstChild("HumanoidRootPart")
+			if not root then continue end
+
+			if (root.Position - origin).Magnitude <= range then
+				kickPlayer(player)
+			end
+		end
+	end))
+
+	-- Connection 2: instant detection when a character spawns in range
+	table.insert(activeConnections, Players.PlayerAdded:Connect(function(player)
+		if not Toggles.AutoKick.Value then return end
+		player.CharacterAdded:Connect(function(char)
+			task.wait(0.1)
+			local root = char:FindFirstChild("HumanoidRootPart")
+			if root and (root.Position - originPart.Position).Magnitude <= Options.KickRange.Value then
+				kickPlayer(player)
+			end
+		end)
+	end))
+end
+
+local function stopAutoKick()
+	for _, conn in ipairs(activeConnections) do
+		pcall(function() conn:Disconnect() end)
+	end
+	activeConnections = {}
+end
+
+Toggles.AutoKick:OnChanged(function()
+	if Toggles.AutoKick.Value then
+		startAutoKick()
+		Library:Notify({ Title = "Kick Ownership", Description = "Auto-kick ON", Time = 2 })
+	else
+		stopAutoKick()
+		Library:Notify({ Title = "Kick Ownership", Description = "Auto-kick OFF", Time = 2 })
+	end
+end)
+
+-- =========================
+--  UI SETTINGS
+-- =========================
+local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu", "wrench")
+
+MenuGroup:AddToggle("KeybindMenuOpen", {
+	Default = Library.KeybindFrame.Visible,
+	Text = "Open Keybind Menu",
+	Callback = function(v) Library.KeybindFrame.Visible = v end,
+})
+
+MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", {
+	Default = "RightShift", NoUI = true, Text = "Menu keybind",
+})
+
+MenuGroup:AddButton("Unload", function()
+	stopAutoKick()
+	Library:Unload()
+end)
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+Library:OnUnload(function()
+	stopAutoKick()
+	print("Kick Ownership unloaded!")
+end)
